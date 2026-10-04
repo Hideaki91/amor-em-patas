@@ -1,0 +1,45 @@
+require('dotenv').config();
+const express=require('express');
+const Database=require('better-sqlite3');
+const multer=require('multer');
+const path=require('path');
+const fs=require('fs');
+const crypto=require('crypto');
+const app=express();
+const PORT=process.env.PORT||3000;
+const root=__dirname;
+const uploads=path.join(root,'public','uploads');
+fs.mkdirSync(uploads,{recursive:true});
+const db=new Database(path.join(root,'adocao.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS donors(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT NOT NULL,phone TEXT NOT NULL,city TEXT NOT NULL,notes TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS adopters(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT NOT NULL,phone TEXT NOT NULL,city TEXT NOT NULL,address TEXT,experience TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS animals(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,species TEXT NOT NULL,sex TEXT NOT NULL,age INTEGER NOT NULL,size TEXT NOT NULL,description TEXT,photo TEXT,status TEXT NOT NULL DEFAULT 'Disponível',donor_id INTEGER,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS adoptions(id INTEGER PRIMARY KEY AUTOINCREMENT,animal_id INTEGER NOT NULL,adopter_id INTEGER NOT NULL,message TEXT,status TEXT NOT NULL DEFAULT 'Pendente',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+`);
+app.use(express.json());
+app.use(express.urlencoded({extended:true}));
+const sessions=new Map();
+const TTL=8*60*60*1000;
+const safeEqual=(a,b)=>{const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y)};
+function adminOnly(req,res,next){const token=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('admin_session='))?.slice(14);const s=token&&sessions.get(token);if(!s||s.expires<Date.now()){if(token)sessions.delete(token);return res.status(401).json({error:'Acesso restrito. Entre como administrador.'})}s.expires=Date.now()+TTL;next()}
+app.post('/api/auth/login',(req,res)=>{const u=process.env.ADMIN_USER,p=process.env.ADMIN_PASSWORD;if(!u||!p)return res.status(503).json({error:'Configure ADMIN_USER e ADMIN_PASSWORD no ambiente.'});if(!safeEqual(req.body.username||'',u)||!safeEqual(req.body.password||'',p))return res.status(401).json({error:'Usuário ou senha incorretos.'});const token=crypto.randomBytes(32).toString('hex');sessions.set(token,{expires:Date.now()+TTL});res.setHeader('Set-Cookie',`admin_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV==='production'?'; Secure':''}`);res.json({ok:true})});
+app.get('/api/auth/me',(req,res)=>{const token=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('admin_session='))?.slice(14);const s=token&&sessions.get(token);res.json({authenticated:!!s&&s.expires>Date.now()})});
+app.post('/api/auth/logout',(req,res)=>{const token=(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('admin_session='))?.slice(14);if(token)sessions.delete(token);res.setHeader('Set-Cookie','admin_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');res.json({ok:true})});
+const storage=multer.diskStorage({destination:(_r,_f,cb)=>cb(null,uploads),filename:(_r,f,cb)=>cb(null,Date.now()+'-'+crypto.randomBytes(5).toString('hex')+path.extname(f.originalname).toLowerCase())});
+const upload=multer({storage,limits:{fileSize:5*1024*1024},fileFilter:(_r,f,cb)=>/image\/(jpeg|png|webp|gif)/.test(f.mimetype)?cb(null,true):cb(new Error('Envie uma imagem JPG, PNG, WEBP ou GIF.'))});
+app.get('/api/animals',(_req,res)=>res.json(db.prepare('SELECT animals.*, donors.name AS donor_name FROM animals LEFT JOIN donors ON donors.id=animals.donor_id ORDER BY animals.id DESC').all()));
+app.post('/api/animals',adminOnly,upload.single('photo'),(req,res)=>{const b=req.body;if(!b.name||!b.species||!b.sex||b.age===''||!b.size)return res.status(400).json({error:'Preencha os campos obrigatórios.'});const r=db.prepare('INSERT INTO animals(name,species,sex,age,size,description,photo,donor_id) VALUES(?,?,?,?,?,?,?,?)').run(b.name,b.species,b.sex,Number(b.age),b.size,b.description||'',req.file?'/uploads/'+req.file.filename:'',b.donor_id?Number(b.donor_id):null);res.status(201).json(db.prepare('SELECT * FROM animals WHERE id=?').get(r.lastInsertRowid))});
+app.put('/api/animals/:id',adminOnly,upload.single('photo'),(req,res)=>{const old=db.prepare('SELECT * FROM animals WHERE id=?').get(req.params.id);if(!old)return res.status(404).json({error:'Animal não encontrado.'});const b=req.body;db.prepare('UPDATE animals SET name=?,species=?,sex=?,age=?,size=?,description=?,photo=?,donor_id=?,status=? WHERE id=?').run(b.name??old.name,b.species??old.species,b.sex??old.sex,Number(b.age??old.age),b.size??old.size,b.description??old.description,req.file?'/uploads/'+req.file.filename:old.photo,b.donor_id?Number(b.donor_id):old.donor_id,b.status??old.status,req.params.id);res.json(db.prepare('SELECT * FROM animals WHERE id=?').get(req.params.id))});
+app.delete('/api/animals/:id',adminOnly,(req,res)=>{const a=db.prepare('SELECT * FROM animals WHERE id=?').get(req.params.id);if(!a)return res.status(404).json({error:'Animal não encontrado.'});db.prepare('DELETE FROM adoptions WHERE animal_id=?').run(a.id);db.prepare('DELETE FROM animals WHERE id=?').run(a.id);if(a.photo&&a.photo.startsWith('/uploads/'))fs.unlink(path.join(root,'public',a.photo),()=>{});res.json({ok:true})});
+function personRoutes(table,fields,publicCreate=false){app.get('/api/'+table,adminOnly,(_q,res)=>res.json(db.prepare('SELECT * FROM '+table+' ORDER BY id DESC').all()));app.post('/api/'+table,...(publicCreate?[]:[adminOnly]),(req,res)=>{const b=req.body;if(fields.some(f=>!String(b[f]||'').trim()))return res.status(400).json({error:'Preencha os campos obrigatórios.'});const cols=[...fields,...(table==='adopters'?['address','experience']:['notes'])];const vals=cols.map(c=>b[c]||'');const r=db.prepare('INSERT INTO '+table+'('+cols.join(',')+') VALUES('+cols.map(()=>'?').join(',')+')').run(...vals);res.status(201).json({id:r.lastInsertRowid})});app.put('/api/'+table+'/:id',adminOnly,(req,res)=>{const cols=fields;db.prepare('UPDATE '+table+' SET '+cols.map(c=>c+'=?').join(',')+' WHERE id=?').run(...cols.map(c=>req.body[c]||''),req.params.id);res.json({ok:true})});app.delete('/api/'+table+'/:id',adminOnly,(req,res)=>{db.prepare('DELETE FROM '+table+' WHERE id=?').run(req.params.id);res.json({ok:true})})}
+personRoutes('donors',['name','email','phone','city']);
+personRoutes('adopters',['name','email','phone','city'],true);
+app.get('/api/adoptions',adminOnly,(_q,res)=>res.json(db.prepare('SELECT adoptions.*,animals.name AS animal_name,adopters.name AS adopter_name,adopters.email,adopters.phone FROM adoptions JOIN animals ON animals.id=adoptions.animal_id JOIN adopters ON adopters.id=adoptions.adopter_id ORDER BY adoptions.id DESC').all()));
+app.post('/api/adoptions',(req,res)=>{const b=req.body;if(!b.animal_id||!b.name||!b.email||!b.phone||!b.city)return res.status(400).json({error:'Informe animal e dados de contato.'});const a=db.prepare("SELECT * FROM animals WHERE id=? AND status='Disponível'").get(b.animal_id);if(!a)return res.status(409).json({error:'Este animal não está disponível.'});let adopter=db.prepare('SELECT * FROM adopters WHERE lower(email)=lower(?)').get(b.email);if(!adopter){const r=db.prepare('INSERT INTO adopters(name,email,phone,city,address,experience) VALUES(?,?,?,?,?,?)').run(b.name,b.email,b.phone,b.city,b.address||'',b.experience||'');adopter={id:r.lastInsertRowid}}const r=db.prepare('INSERT INTO adoptions(animal_id,adopter_id,message) VALUES(?,?,?)').run(a.id,adopter.id,b.message||'');db.prepare("UPDATE animals SET status='Em processo' WHERE id=?").run(a.id);res.status(201).json({ok:true,request_id:r.lastInsertRowid,message:'Solicitação registrada. Guarde o número para referência.'})});
+app.patch('/api/adoptions/:id',adminOnly,(req,res)=>{const s=req.body.status;if(!['Pendente','Aprovada','Recusada'].includes(s))return res.status(400).json({error:'Status inválido.'});const a=db.prepare('SELECT * FROM adoptions WHERE id=?').get(req.params.id);if(!a)return res.status(404).json({error:'Solicitação não encontrada.'});db.prepare('UPDATE adoptions SET status=? WHERE id=?').run(s,a.id);db.prepare('UPDATE animals SET status=? WHERE id=?').run(s==='Aprovada'?'Adotado':s==='Recusada'?'Disponível':'Em processo',a.animal_id);res.json({ok:true})});
+app.delete('/api/adoptions/:id',adminOnly,(req,res)=>{db.prepare('DELETE FROM adoptions WHERE id=?').run(req.params.id);res.json({ok:true})});
+app.use(express.static(path.join(root,'public')));
+app.use((err,_req,res,_next)=>res.status(400).json({error:err.message||'Erro ao processar a solicitação.'}));
+app.listen(PORT,()=>console.log('Amor em Patas disponível em http://localhost:'+PORT));

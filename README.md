@@ -159,3 +159,85 @@ amor-em-patas/
 ## Estado do projeto
 
 Este repositório contém a aplicação e suas funcionalidades descritas acima. Antes de utilizar em produção, faça testes de ponta a ponta, revise as medidas de segurança e configure o ambiente de hospedagem.
+
+
+## Modelo e processos do banco de dados
+
+O sistema utiliza o **SQLite** para guardar os dados em `adocao.db`. O arquivo é criado automaticamente quando o servidor inicia. A estrutura definida em `server.js` possui quatro tabelas: `animals`, `adopters`, `donors` e `adoptions`.
+
+### 1. Tabelas e dados armazenados
+
+#### `animals` — Animais
+Armazena os animais cadastrados para adoção:
+
+- `id`: identificador único (chave primária).
+- `name`, `species`, `sex`, `age` e `size`: informações básicas do animal.
+- `description`: descrição complementar.
+- `photo`: caminho da foto enviada.
+- `status`: situação do animal; o valor inicial é **Disponível**.
+- `donor_id`: identificador do doador relacionado, quando informado.
+- `created_at`: data e hora do cadastro, preenchida por padrão com `CURRENT_TIMESTAMP`.
+
+#### `adopters` — Adotantes
+Guarda os dados das pessoas interessadas em adotar:
+
+- `id`: identificador único.
+- `name`, `email`, `phone` e `city`: dados de contato.
+- `address` e `experience`: informações adicionais, quando fornecidas.
+- `created_at`: data e hora do cadastro.
+
+Ao receber uma solicitação, o servidor procura um adotante pelo e-mail, sem diferenciar letras maiúsculas e minúsculas. Se não encontrar, cria um cadastro. **O esquema atual não define uma restrição SQL `UNIQUE` para o e-mail.**
+
+#### `donors` — Doadores
+Armazena os dados de quem está associado à doação de animais ou apoia o projeto:
+
+- `id`: identificador único.
+- `name`, `email`, `phone` e `city`: dados de contato.
+- `notes`: observações opcionais.
+- `created_at`: data e hora do cadastro.
+
+#### `adoptions` — Solicitações de adoção
+Registra os pedidos enviados pelo formulário público:
+
+- `id`: identificador único.
+- `animal_id`: animal relacionado à solicitação.
+- `adopter_id`: adotante que enviou o pedido.
+- `message`: mensagem ou observação do interessado.
+- `status`: situação da solicitação; começa como **Pendente**.
+- `created_at`: data e hora do pedido.
+
+### 2. Relacionamentos entre as tabelas
+
+O modelo lógico relaciona as tabelas desta forma:
+
+- **Doadores → Animais:** `animals.donor_id` aponta para o doador associado ao animal. Um doador pode estar associado a vários animais.
+- **Adotantes → Solicitações:** `adoptions.adopter_id` identifica o adotante de cada solicitação. Um adotante pode realizar solicitações ao longo do tempo.
+- **Animais → Solicitações:** `adoptions.animal_id` identifica o animal pretendido. Um animal pode aparecer em solicitações ao longo do tempo.
+
+Uma relação **1:N (um para muitos)** significa que um registro de uma tabela pode estar associado a vários registros de outra tabela. Os campos acima são usados pelo código para relacionar os dados nas consultas. **A definição SQL atual não declara explicitamente restrições `FOREIGN KEY`**, por isso esses vínculos são aplicados pela lógica da aplicação e não por restrições de chave estrangeira do SQLite.
+
+### 3. Fluxo de uma solicitação de adoção
+
+1. A pessoa escolhe um animal exibido como **Disponível** e preenche nome, e-mail, telefone e cidade.
+2. O servidor verifica se os campos obrigatórios foram enviados e consulta o animal para confirmar que ele ainda está disponível.
+3. O servidor procura o adotante pelo e-mail. Se não houver cadastro correspondente, cria um registro em `adopters`.
+4. O pedido é inserido em `adoptions`, com o status inicial **Pendente** e a mensagem enviada.
+5. O status do animal é atualizado para **Em processo**, e o sistema devolve o número da solicitação.
+6. Na área administrativa, o administrador pode atualizar a solicitação para **Aprovada**, **Recusada** ou **Pendente**. O animal passa para **Adotado** quando aprovada, volta a **Disponível** quando recusada ou fica **Em processo** quando pendente.
+
+### 4. Chaves, tipos e valores padrão
+
+- **PK (chave primária):** identifica exclusivamente cada registro, como o campo `id` de cada tabela.
+- **Referências entre tabelas:** campos como `donor_id`, `animal_id` e `adopter_id` conectam registros relacionados.
+- **INTEGER:** usado para identificadores e idade.
+- **TEXT:** usado para nomes, contatos, descrições, caminhos de fotos e status.
+- **CURRENT_TIMESTAMP:** valor padrão utilizado para registrar data e hora de criação.
+
+### 5. Arquivos e armazenamento
+
+- O banco de dados fica no arquivo local `adocao.db).
+- As fotos enviadas são gravadas em `public/uploads/`; a tabela de animais guarda o caminho da foto no campo `photo`.
+- O banco e as imagens locais são ignorados pelo Git conforme as regras do `.gitignore`, evitando o envio acidental de dados e arquivos locais ao repositório.
+- Para uso real, mantenha backups seguros e proteja os dados pessoais armazenados.
+
+> **Nota sobre o diagrama:** a imagem do banco de dados é uma representação visual para facilitar a compreensão. Os nomes e campos descritos nesta seção seguem o esquema atualmente criado em `server.js`; por isso, alguns nomes diferem dos rótulos em português exibidos no diagrama.

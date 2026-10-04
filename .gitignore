@@ -1,0 +1,6 @@
+node_modules/
+.env
+adocao.db
+adocao.db-shm
+adocao.db-wal
+public/uploads/
